@@ -1,7 +1,11 @@
 object QueryDSL {
-  trait Statement {
+  trait ColumnLike
+
+  trait PreparedStatement {
     def toStatement: (String, Vector[Any])
   }
+
+  type ColumnWithPrepared = ColumnLike with PreparedStatement
 
   case class Column(columnName: String) {
     private def withColumn(operator: String, column: Column) = ColumnStatement(
@@ -38,55 +42,84 @@ object QueryDSL {
   case class ColumnStatement(
     sql: String,
     placeHolder: Option[Any],
-    subStatements: Vector[(String, ColumnStatement)]
-  ) extends Statement {
+    subStatements: Vector[(String, ColumnWithPrepared)]
+  ) extends ColumnLike with PreparedStatement {
 
     def toStatement = {
-      val combinedSql = sql + subStatements.foldLeft("") {
-        case (acc, (operator, statement)) => s"$acc $operator ${statement.sql}"
-      }
+      val combinedSql = "(" + sql + subStatements.foldLeft("") {
+        case (acc, (operator, statement)) => s"$acc $operator ${statement.toStatement._1}"
+      } + ")"
 
       val subPlaceHolders = for {
         (_, statement) <- subStatements
-        placeHolder <- statement.placeHolder
-      } yield placeHolder
+        (_, statementPlaceHolders) = statement.toStatement
+      } yield statementPlaceHolders
 
-      (combinedSql, placeHolder.toVector ++ subPlaceHolders)
+      (combinedSql, placeHolder.toVector ++ subPlaceHolders.flatten)
     }
 
-    def and(subStatement: ColumnStatement): ColumnStatement = this.copy(
+    def and(subStatement: ColumnWithPrepared): ColumnStatement = this.copy(
       subStatements = subStatements :+ Tuple2("AND", subStatement)
     )
 
-    def or(subStatement: ColumnStatement): ColumnStatement = this.copy(
+    def or(subStatement: ColumnWithPrepared): ColumnStatement = this.copy(
       subStatements = subStatements :+ Tuple2("OR", subStatement)
     )
   }
 
-  trait Join extends Statement
+  case class Block(
+    statement: ColumnWithPrepared,
+    subStatements: Vector[(String, ColumnWithPrepared)]
+  ) extends ColumnLike with PreparedStatement {
 
-  case class LeftJoin(tableName: String, on: ColumnStatement) extends Join {
+    def toStatement = {
+      val (statementSql, statementPlaceHolders) = statement.toStatement
+
+      val combinedSql = "(" + statementSql + subStatements.foldLeft("") {
+        case (acc, (operator, statement)) => s"$acc $operator ${statement.toStatement._1}"
+      } + ")"
+
+      val subPlaceHolders = for {
+        (_, statement) <- subStatements
+        (_, statementPlaceHolders) = statement.toStatement
+      } yield statementPlaceHolders
+
+      (combinedSql, statementPlaceHolders ++ subPlaceHolders.flatten)
+    }
+
+    def and(subStatement: ColumnWithPrepared): Block = this.copy(
+      subStatements = subStatements :+ Tuple2("AND", subStatement)
+    )
+
+    def or(subStatement: ColumnWithPrepared): Block = this.copy(
+      subStatements = subStatements :+ Tuple2("OR", subStatement)
+    )
+  }
+
+  trait Join extends PreparedStatement
+
+  case class LeftJoin(tableName: String, on: ColumnWithPrepared) extends Join {
     def toStatement = {
       val (onSql, onPlaceHolders) = on.toStatement
       (s"LEFT JOIN $tableName ON $onSql", onPlaceHolders)
     }
   }
 
-  case class RightJoin(tableName: String, on: ColumnStatement) extends Join {
+  case class RightJoin(tableName: String, on: ColumnWithPrepared) extends Join {
     def toStatement = {
       val (onSql, onPlaceHolders) = on.toStatement
       (s"RIGHT JOIN $tableName ON $onSql", onPlaceHolders)
     }
   }
 
-  case class InnerJoin(tableName: String, on: ColumnStatement) extends Join {
+  case class InnerJoin(tableName: String, on: ColumnWithPrepared) extends Join {
     def toStatement = {
       val (onSql, onPlaceHolders) = on.toStatement
       (s"INNER JOIN $tableName ON $onSql", onPlaceHolders)
     }
   }
 
-  case class IncompleteSelect(columnNames: Seq[String]) extends Statement {
+  case class IncompleteSelect(columnNames: Seq[String]) extends PreparedStatement {
     def toStatement: Nothing = throw new Exception("Incomplete Select Statement")
     def from(tableName: String): Select = Select(columnNames, tableName)
   }
@@ -94,29 +127,30 @@ object QueryDSL {
   case class Select(
     columnNames: Seq[String],
     tableName: String,
-    where: Vector[ColumnStatement],
+    where: Vector[ColumnWithPrepared],
     joins: Vector[Join],
-    groupBys: Vector[ColumnStatement]
-  ) extends Statement {
+    groupBys: Vector[ColumnWithPrepared]
+  ) extends PreparedStatement {
 
     def from(tableName: String): Select = this.copy(tableName = tableName)
-    def where(column: ColumnStatement): Select = this.copy(where = where :+ column)
+    def where(column: ColumnWithPrepared): Select = this.copy(where = where :+ column)
 
-    def leftJoin(tableName: String, on: ColumnStatement): Select = {
+    def leftJoin(tableName: String, on: ColumnWithPrepared): Select = {
       this.copy(joins = joins :+ LeftJoin(tableName, on))
     }
 
-    def rightJoin(tableName: String, on: ColumnStatement): Select = {
+    def rightJoin(tableName: String, on: ColumnWithPrepared): Select = {
       this.copy(joins = joins :+ RightJoin(tableName, on))
     }
 
-    def innerJoin(tableName: String, on: ColumnStatement): Select = {
+    def innerJoin(tableName: String, on: ColumnWithPrepared): Select = {
       this.copy(joins = joins :+ InnerJoin(tableName, on))
     }
 
-    def groupBy(column: ColumnStatement): Select = this.copy(groupBys = groupBys :+ column)
+    def groupBy(column: ColumnWithPrepared): Select = this.copy(groupBys = groupBys :+ column)
 
     def toStatement = {
+      // Where clauses
       val (whereClauses, wherePlaceHolders) =
         if (where.isEmpty) ("", Vector())
         else {
@@ -125,8 +159,10 @@ object QueryDSL {
           (sql, placeHolders)
         }
 
+      // Join clauses
       val (joinClauses, joinPlaceHolders) = joins.map(_.toStatement).unzip
 
+      // Group by clauses
       val (groupByClauses, groupByPlaceHolders) =
         if (groupBys.isEmpty) ("", Vector())
         else {
@@ -156,7 +192,9 @@ object QueryDSL {
 
   def select(columnNames: String*) = IncompleteSelect(columnNames)
   def col(columnName: String) = Column(columnName)
+  def block(statement: ColumnWithPrepared): Block = Block(statement, Vector())
 
+  // Example query
   val query =
     select("members.*", "someTable.column")
       .from("members")
@@ -167,13 +205,20 @@ object QueryDSL {
       )
       .innerJoin("anotherTable", col("id").eq(col("anotherTable.id")))
       .where(
-        col("id").eq(2)
-          .and(
-            col("name").like("Bob%")
-          )
+        block(
+          col("id").eq(2)
+            .and(
+              col("name").like("Bob%")
+            )
+            .and(col("age").gte(30))
+        ).or(col("id").eq(3))
       )
       .groupBy(col("name").asc
         .and(
           col("id").desc
         ))
+
+  // Run the following in a REPL:
+  // import QueryDSL._
+  // val(sql, placeHolders) = query.toStatement
 }
