@@ -15,11 +15,11 @@ object QueryDSL {
       s"$columnName $operator ?", Vector(value), Vector()
     )
 
-    def eq(column: Column): ColumnStatement = withColumn("=", column)
-    def eq(value: Any): ColumnStatement = withValue("=", value)
+    def eql(column: Column): ColumnStatement = withColumn("=", column)
+    def eql(value: Any): ColumnStatement = withValue("=", value)
 
-    def notEq(column: Column): ColumnStatement = withColumn("<>", column)
-    def notEq(value: Any): ColumnStatement = withValue("<>", value)
+    def notEql(column: Column): ColumnStatement = withColumn("<>", column)
+    def notEql(value: Any): ColumnStatement = withValue("<>", value)
 
     def gt(column: Column): ColumnStatement = withColumn(">", column)
     def gt(value: Any): ColumnStatement = withValue(">", value)
@@ -38,9 +38,13 @@ object QueryDSL {
 
     def like(value: String): ColumnStatement = withValue("LIKE", value)
 
-    // def in(select: Select): ColumnStatement = ColumnStatement(
-    //   s"$columnName IN(" +   + ")"
-    // )
+    def in(select: Select): ColumnStatement = {
+      val (selectSql, selectPlaceHolders) = select.toStatement
+
+      ColumnStatement(
+        s"$columnName IN(\n$selectSql\n)", selectPlaceHolders, Vector()
+      )
+    }
     def in(values: Any*): ColumnStatement = ColumnStatement(
       s"$columnName IN(" + values.map(_ => "?").mkString(", ") + ")", values.toVector, Vector()
     )
@@ -180,13 +184,13 @@ object QueryDSL {
 
       val placeHolders = joinPlaceHolders.flatten ++ wherePlaceHolders.flatten ++ groupByPlaceHolders.flatten
 
-      val sql = s"""
-      |SELECT ${columnNames.mkString(", ")}
-      |FROM $tableName
-      |${joinClauses.mkString("\n")}
-      |$whereClauses
-      |$groupByClauses
-      """.stripMargin.trim
+      val sql = Vector(
+        s"SELECT ${columnNames.mkString(", ")}",
+        s"FROM $tableName",
+        joinClauses.mkString("\n"),
+        whereClauses,
+        groupByClauses
+      ).filter(_.length > 0).mkString("\n")
 
       (sql, placeHolders)
     }
@@ -207,19 +211,24 @@ object QueryDSL {
       .from("members")
       .leftJoin(
         "someTable",
-        col("id").eq(col("someTable.id"))
-          .and(col("someTable.id").notEq(3))
+        col("id").eql(col("someTable.id"))
+          .and(col("someTable.id").notEql(3))
       )
-      .innerJoin("anotherTable", col("id").eq(col("anotherTable.id")))
+      .innerJoin("anotherTable", col("id").eql(col("anotherTable.id")))
       .where(
         block(
-          col("id").eq(2)
+          col("id").eql(2)
             .and(
               col("name").like("Bob%")
             )
             .and(col("age").gte(30))
-        ).or(col("id").eq(92))
+        ).or(col("id").eql(92))
           .or(col("otherId").in(4, 5, 6))
+          .and(col("field").in(
+            select("aTable.field")
+              .from("aTable")
+              .where(col("field").eql("active"))
+          ))
       )
       .groupBy(col("name").asc
         .and(
