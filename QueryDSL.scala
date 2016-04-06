@@ -234,8 +234,4 @@ object QueryDSL {
         .and(
           col("id").desc
         ))
-
-  // Run the following in a REPL:
-  // import QueryDSL._
-  // val(sql, placeHolders) = query.toStatement
 }
