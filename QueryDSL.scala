@@ -9,10 +9,10 @@ object QueryDSL {
 
   case class Column(columnName: String) {
     private def withColumn(operator: String, column: Column) = ColumnStatement(
-      s"$columnName $operator ${column.columnName}", None, Vector()
+      s"$columnName $operator ${column.columnName}", Vector(), Vector()
     )
     private def withValue(operator: String, value: Any) = ColumnStatement(
-      s"$columnName $operator ?", Some(value), Vector()
+      s"$columnName $operator ?", Vector(value), Vector()
     )
 
     def eq(column: Column): ColumnStatement = withColumn("=", column)
@@ -33,15 +33,22 @@ object QueryDSL {
     def lte(column: Column): ColumnStatement = withColumn("<=", column)
     def lte(value: Any): ColumnStatement = withValue("<=", value)
 
-    def asc: ColumnStatement = ColumnStatement(s"$columnName ASC", None, Vector())
-    def desc: ColumnStatement = ColumnStatement(s"$columnName DESC", None, Vector())
+    def asc: ColumnStatement = ColumnStatement(s"$columnName ASC", Vector(), Vector())
+    def desc: ColumnStatement = ColumnStatement(s"$columnName DESC", Vector(), Vector())
 
     def like(value: String): ColumnStatement = withValue("LIKE", value)
+
+    // def in(select: Select): ColumnStatement = ColumnStatement(
+    //   s"$columnName IN(" +   + ")"
+    // )
+    def in(values: Any*): ColumnStatement = ColumnStatement(
+      s"$columnName IN(" + values.map(_ => "?").mkString(", ") + ")", values.toVector, Vector()
+    )
   }
 
   case class ColumnStatement(
     sql: String,
-    placeHolder: Option[Any],
+    placeHolders: Vector[Any],
     subStatements: Vector[(String, ColumnWithPrepared)]
   ) extends ColumnLike with PreparedStatement {
 
@@ -55,7 +62,7 @@ object QueryDSL {
         (_, statementPlaceHolders) = statement.toStatement
       } yield statementPlaceHolders
 
-      (combinedSql, placeHolder.toVector ++ subPlaceHolders.flatten)
+      (combinedSql, placeHolders.toVector ++ subPlaceHolders.flatten)
     }
 
     def and(subStatement: ColumnWithPrepared): ColumnStatement = this.copy(
@@ -211,7 +218,8 @@ object QueryDSL {
               col("name").like("Bob%")
             )
             .and(col("age").gte(30))
-        ).or(col("id").eq(3))
+        ).or(col("id").eq(92))
+          .or(col("otherId").in(4, 5, 6))
       )
       .groupBy(col("name").asc
         .and(
